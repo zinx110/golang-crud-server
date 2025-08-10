@@ -5,16 +5,21 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"sync"
 )
 
 type User struct {
-	Id   int    `json:"id,string"`
+	Id   int    `json:"id"`
 	Name string `json:"name"`
 }
 
+var serial = 0
 var users = make([]User, 0)
+var mu = sync.RWMutex{}
 
 func UsersHandler(w http.ResponseWriter, r *http.Request) {
+	fmt.Println("UsersHandler called")
+
 	switch r.Method {
 	case http.MethodGet:
 		if r.PathValue("id") != "" {
@@ -38,15 +43,23 @@ func UsersHandler(w http.ResponseWriter, r *http.Request) {
 func getAllUsers(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("getAllUsers called")
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	mu.RLock()
+	output := make([]User, len(users))
+	copy(output, users)
+	mu.RUnlock()
+
 	encoder := json.NewEncoder(w)
-	err := encoder.Encode(users)
+	err := encoder.Encode(output)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
+
 }
 
 func addUser(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("adding user")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	decoder := json.NewDecoder(r.Body)
 	var data User
 	err := decoder.Decode(&data)
@@ -54,37 +67,56 @@ func addUser(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	data.Id = len(users) + 1
 	if data.Name == "" {
 		http.Error(w, "Name is required", http.StatusBadRequest)
 		return
 	}
-	users = append(users, data)
-	w.Header().Set("Content-Type", "application/json")
+	mu.Lock()
+	serial++
+	id := serial
+	u := User{
+		Id:   id,
+		Name: data.Name,
+	}
+	users = append(users, u)
+	mu.Unlock()
+
 	w.WriteHeader(http.StatusCreated)
-	_ = json.NewEncoder(w).Encode(data)
-	fmt.Println("User added successfully:", data)
+	_ = json.NewEncoder(w).Encode(u)
+	fmt.Println("User added successfully:", u)
 }
 
 func getUser(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("getting user")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	idStr := r.PathValue(("id"))
 	id, err := strconv.Atoi(idStr)
 	if err != nil || id == 0 {
 		http.Error(w, "Id is invalid", http.StatusBadRequest)
 		return
 	}
-	for _, user := range users {
-		if user.Id == id {
-			w.Header().Set("Content-Type", "application/json; charset=utf-8")
-			if err := json.NewEncoder(w).Encode(user); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			return
+	var selectedUser *User
+	mu.RLock()
+	for i := range users {
+		if users[i].Id == id {
+			u := users[i]
+			selectedUser = &u
+			break
 		}
 	}
-	http.Error(w, "User not found", http.StatusNotFound)
+	mu.RUnlock()
+
+	if selectedUser == nil {
+		http.Error(w, "User not found", http.StatusNotFound)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+
+	if err := json.NewEncoder(w).Encode(selectedUser); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	fmt.Println("User retrieved successfully:", selectedUser)
 }
 
 func deleteUser(w http.ResponseWriter, r *http.Request) {
@@ -96,38 +128,34 @@ func deleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	index := -1
+	mu.Lock()
+
 	for i, user := range users {
 		if user.Id == id {
 			index = i
 			break
 		}
 	}
+
 	if index == -1 {
+		mu.Unlock()
 		http.Error(w, "User not found", http.StatusNotFound)
 		return
 	}
+
 	users = append(users[:index], users[index+1:]...)
+	mu.Unlock()
+
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func updateUser(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("updating user")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	idStr := r.PathValue("id")
 	id, err := strconv.Atoi(idStr)
 	if err != nil || id == 0 {
 		http.Error(w, "id is invalid", http.StatusBadRequest)
-		return
-	}
-	index := -1
-	for i, user := range users {
-		if user.Id == id {
-			index = i
-			break
-		}
-	}
-
-	if index == -1 {
-		http.Error(w, "User not found", http.StatusNotFound)
 		return
 	}
 	var data User
@@ -137,11 +165,33 @@ func updateUser(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, decodeErr.Error(), http.StatusBadRequest)
 		return
 	}
-	// Update the user's fields
-	if data.Name != "" {
-		users[index].Name = data.Name
+	if data.Name == "" {
+		http.Error(w, "Name is required", http.StatusBadRequest)
+		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusAccepted)
-	_ = json.NewEncoder(w).Encode(users[index])
+
+	index := -1
+	mu.Lock()
+	for i, user := range users {
+		if user.Id == id {
+			index = i
+			break
+		}
+	}
+
+	if index == -1 {
+		mu.Unlock()
+		http.Error(w, "User not found", http.StatusNotFound)
+		return
+	}
+	// Update the user's fields
+	var selectedUser *User
+
+	users[index].Name = data.Name
+	u := users[index]
+	selectedUser = &u
+
+	mu.Unlock()
+
+	_ = json.NewEncoder(w).Encode(selectedUser)
 }
