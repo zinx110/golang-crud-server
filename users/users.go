@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"randomGoServer/db"
 	"strconv"
 	"sync"
 )
@@ -43,13 +44,32 @@ func UsersHandler(w http.ResponseWriter, r *http.Request) {
 func getAllUsers(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("getAllUsers called")
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	mu.RLock()
-	output := make([]User, len(users))
-	copy(output, users)
-	mu.RUnlock()
+
+	rows, err := db.DBpool.Query(r.Context(), "SELECT * FROM users")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	defer rows.Close()
+
+	var output []User
+	for rows.Next() {
+		var user User
+		if err := rows.Scan(&user.Id, &user.Name); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		output = append(output, user)
+	}
+
+	if err := rows.Err(); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 
 	encoder := json.NewEncoder(w)
-	err := encoder.Encode(output)
+	err = encoder.Encode(output)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -96,15 +116,7 @@ func getUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var selectedUser *User
-	mu.RLock()
-	for i := range users {
-		if users[i].Id == id {
-			u := users[i]
-			selectedUser = &u
-			break
-		}
-	}
-	mu.RUnlock()
+	err = db.DBpool.QueryRow(r.Context(), "Select * from users where id=$1", id).Scan(&selectedUser.Id, &selectedUser.Name)
 
 	if selectedUser == nil {
 		http.Error(w, "User not found", http.StatusNotFound)
